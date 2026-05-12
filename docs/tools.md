@@ -40,6 +40,8 @@ Resolve a free-form compound identifier to one or more PubChem CIDs.
 
 Backend: PUG-REST `/compound/{type}/{query}/cids/JSON` then `/compound/cid/{cids}/property/...`.
 
+**InChI input**: when `identifierType` is `inchi`, the server submits the InChI as a `POST /compound/inchi/cids/JSON` with a form-urlencoded body (`inchi=<value>`) — PubChem's documented channel for InChI lookups. Path-encoded InChI is not used.
+
 Limitations: name lookups can be ambiguous; the server returns at most `limit` candidates without further re-ranking.
 
 ---
@@ -106,7 +108,7 @@ Backend: PUG-REST `/compound/cid/{cid}/synonyms/JSON`.
 | `format` | enum `smiles`/`inchi`/`inchikey`/`sdf`/`json` | `smiles` |
 | `recordType` | `2d` or `3d` (SDF only) | unset |
 
-Output: `{ cid, format, content, contentType, truncated?, _meta }`. SDF content is truncated above 256 KB with `truncated: true`.
+Output: `{ cid, format, content, contentType, truncated?, _meta }`. Both `sdf` and `json` content are bounded at **256 KB**; oversized responses are truncated and the result includes `truncated: true` plus a `_meta.warnings` entry indicating the original size. SMILES / InChI / InChIKey responses are small and not bounded.
 
 Backend: PUG-REST property endpoint for SMILES/InChI/InChIKey, `/compound/cid/{cid}/SDF` for SDF, full record JSON for `json`.
 
@@ -129,6 +131,8 @@ Run an identity / similarity / substructure / superstructure search.
 The server prefers the synchronous `fast*` variants. Async responses with `Waiting.ListKey` are polled (2s interval, up to 30 attempts). Each hit is enriched with `MolecularFormula`, `MolecularWeight`, `CanonicalSMILES`, and `InChIKey`.
 
 Backend: PUG-REST structure search + property enrichment.
+
+**InChI input**: when `queryType` is `inchi`, the server submits the search as `POST /compound/{operation}/inchi/cids/JSON` with a form-urlencoded `inchi=<value>` body — PubChem's documented channel. SMILES queries continue to use path-encoded GET.
 
 Limitations: unbounded searches are not supported. `limit` is clamped at 100 to keep responses inside the MCP transport budget.
 

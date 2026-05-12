@@ -5,6 +5,7 @@ import {
 import type { StructureSearchResult } from '../pubchem/pubchemTypes.js';
 import {
   buildCompoundByCidPropertyUrl,
+  buildStructureSearchInchiPostUrl,
   buildStructureSearchUrl,
   publicCompoundUrl,
 } from '../pubchem/pubchemUrls.js';
@@ -37,15 +38,30 @@ export class StructureSearchService {
     }
     const limit = clamp(input.limit ?? 25, 1, 100);
 
-    const url = buildStructureSearchUrl(urlConfig(this.ctx.config), {
-      queryType: input.queryType,
-      searchType: input.searchType,
-      query,
-      threshold: input.searchType === 'similarity_2d' ? threshold ?? 90 : undefined,
-      maxRecords: limit,
-      preferFast: true,
-    });
-    const body = await this.ctx.rest.getJson<WaitingOrList>(url);
+    let body: WaitingOrList;
+    if (input.queryType === 'inchi') {
+      // PubChem requires POST/form-urlencoded for InChI structure searches.
+      const url = buildStructureSearchInchiPostUrl(
+        urlConfig(this.ctx.config),
+        input.searchType,
+        {
+          ...(input.searchType === 'similarity_2d' ? { threshold: threshold ?? 90 } : {}),
+          maxRecords: limit,
+          preferFast: true,
+        },
+      );
+      body = await this.ctx.rest.postFormJson<WaitingOrList>(url, { inchi: query });
+    } else {
+      const url = buildStructureSearchUrl(urlConfig(this.ctx.config), {
+        queryType: input.queryType,
+        searchType: input.searchType,
+        query,
+        ...(input.searchType === 'similarity_2d' ? { threshold: threshold ?? 90 } : {}),
+        maxRecords: limit,
+        preferFast: true,
+      });
+      body = await this.ctx.rest.getJson<WaitingOrList>(url);
+    }
 
     let cids: number[] = [];
     let listKey: string | undefined;

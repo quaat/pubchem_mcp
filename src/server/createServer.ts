@@ -10,8 +10,9 @@ import type { ServiceContext } from '../services/serviceContext.js';
 import { registerTools } from './tools.js';
 import { registerResources } from './resources.js';
 import { registerPrompts } from './prompts.js';
+import { PACKAGE_VERSION } from '../version.js';
 
-export const PACKAGE_VERSION = '0.1.0';
+export { PACKAGE_VERSION };
 
 export interface CreateServerOptions {
   config: Config;
@@ -37,7 +38,11 @@ export function createServer(opts: CreateServerOptions): CreatedServer {
     maxEntries: opts.config.cacheMaxEntries,
     disabled: opts.config.cacheDisabled,
   });
-  const rateLimiter = new RateLimiter({ rps: opts.config.rps, rpm: opts.config.rpm });
+  const rateLimiter = new RateLimiter({
+    rps: opts.config.rps,
+    rpm: opts.config.rpm,
+    ...(opts.sleep ? { sleep: opts.sleep } : {}),
+  });
   const throttle = new ThrottleStateTracker();
   const rest = new PugRestClient({
     config: opts.config,

@@ -27,7 +27,12 @@ export interface RequestOptions {
   /** AbortSignal that callers can use to cancel. */
   signal?: AbortSignal;
   /** Override cache behavior for this call. */
-  cache?: { bypass?: boolean; ttlMs?: number };
+  cache?: {
+    /** Skip cache read+write for this call. */
+    bypass?: boolean;
+    /** Override the cache-wide TTL for this entry. */
+    ttlMs?: number;
+  };
 }
 
 export interface PugRestClientDeps {
@@ -75,17 +80,31 @@ export interface PollListKeyOptions {
   signal?: AbortSignal;
 }
 
+/** Internal request specification used by `requestPipelined`. */
+interface RequestSpec {
+  url: string;
+  method: 'GET' | 'POST';
+  format: ResponseFormat;
+  /** Already-serialized request body, or undefined for GET. */
+  body?: string;
+  /** Additional headers (e.g. Content-Type for POST). */
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
 /**
  * PugRestClient — single point of network I/O for PUG-REST and PUG-View.
  *
- * Pipeline for every request:
- *   1. Cache check (GET, JSON/text bodies).
+ * Pipeline for every request (GET or POST):
+ *   1. Cache check (GET only; POST never reads cache).
  *   2. Rate limiter acquire (token bucket per-second + sliding window per-minute).
  *   3. Throttle gate: if the most recent X-Throttling-Control was Red/Black, sleep first.
  *   4. fetch() with AbortController timeout and PubChem-friendly User-Agent.
  *   5. Parse X-Throttling-Control into the shared state tracker.
  *   6. Retry on 429/5xx + network errors using exponential backoff with jitter.
  *   7. Map HTTP errors to typed PubChemError classes.
+ *
+ * GET responses are cached (when not bypassed). POST responses are never cached.
  */
 export class PugRestClient {
   protected readonly config: Config;
@@ -113,6 +132,8 @@ export class PugRestClient {
     this.userAgent = `${PACKAGE_NAME}/${version}${contact}`;
   }
 
+  // -------- GET helpers --------------------------------------------------
+
   async getJson<T>(url: string, opts?: RequestOptions): Promise<T> {
     const result = await this.request(url, { ...opts, format: 'json' });
     return result as T;
@@ -125,7 +146,7 @@ export class PugRestClient {
 
   async request(url: string, opts: RequestOptions = {}): Promise<unknown> {
     const format = opts.format ?? 'json';
-    const cacheKey = `${format}:${url}`;
+    const cacheKey = `GET:${format}:${url}`;
     if (!opts.cache?.bypass) {
       const cached = this.cache.get(cacheKey);
       if (cached && cached.format === format) {
@@ -133,7 +154,86 @@ export class PugRestClient {
       }
     }
 
-    const body = await withRetry(() => this.executeOnce(url, format, opts.signal), {
+    const body = await this.requestPipelined({
+      url,
+      method: 'GET',
+      format,
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+
+    if (!opts.cache?.bypass) {
+      this.cache.set(cacheKey, { format, body }, opts.cache?.ttlMs);
+    }
+    return body;
+  }
+
+  // -------- POST helpers -------------------------------------------------
+
+  /**
+   * POST a form-urlencoded body to PubChem.
+   *
+   * PubChem documents POST/form input for `InChI` and `SDF` payloads (and for
+   * very large structure queries that would exceed URL length limits).
+   * Responses are NEVER cached because the request body is part of the
+   * identity of the response and we do not currently hash it.
+   */
+  async postFormJson<T>(
+    url: string,
+    form: Record<string, string>,
+    opts?: Omit<RequestOptions, 'cache'> & { signal?: AbortSignal },
+  ): Promise<T> {
+    const body = new URLSearchParams(form).toString();
+    const result = await this.requestPipelined({
+      url,
+      method: 'POST',
+      format: opts?.format ?? 'json',
+      body,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+    return result as T;
+  }
+
+  // -------- ListKey polling ---------------------------------------------
+
+  /**
+   * Poll an asynchronous ListKey response until results arrive or we time out.
+   * Returns the array of CIDs.
+   */
+  async pollListKey(listKey: string, opts: PollListKeyOptions = {}): Promise<number[]> {
+    const intervalMs = opts.intervalMs ?? 2_000;
+    const maxAttempts = opts.maxAttempts ?? 30;
+    const url = buildListKeyPollUrl(
+      { baseUrl: this.config.baseUrl, viewBaseUrl: this.config.viewBaseUrl },
+      listKey,
+    );
+
+    for (let i = 0; i < maxAttempts; i++) {
+      const body = (await this.request(url, {
+        format: 'json',
+        cache: { bypass: true },
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      })) as AsyncWaitingResponse & ListResponse;
+      if (body.IdentifierList?.CID) {
+        return body.IdentifierList.CID;
+      }
+      if (!body.Waiting?.ListKey) {
+        throw new PubChemResponseError(
+          'Unexpected response shape while polling list key',
+          { endpoint: 'compound/listkey' },
+        );
+      }
+      await this.sleep(intervalMs);
+    }
+    throw new PubChemTransientError('List key polling timed out', {
+      endpoint: 'compound/listkey',
+    });
+  }
+
+  // -------- Internal: shared request pipeline ---------------------------
+
+  private async requestPipelined(spec: RequestSpec): Promise<unknown> {
+    return withRetry(() => this.executeOnce(spec), {
       maxAttempts: Math.max(1, this.config.maxRetries),
       baseDelayMs: 500,
       maxDelayMs: 16_000,
@@ -152,57 +252,19 @@ export class PugRestClient {
       },
       onRetry: (err, attempt, delayMs) => {
         this.logger.debug(
-          { attempt, delayMs, endpoint: sanitizeEndpoint(url, this.config) },
+          {
+            attempt,
+            delayMs,
+            method: spec.method,
+            endpoint: sanitizeEndpoint(spec.url, this.config),
+          },
           `retrying after error: ${(err as Error).message}`,
         );
       },
     });
-
-    if (!opts.cache?.bypass) {
-      this.cache.set(cacheKey, { format, body });
-    }
-    return body;
   }
 
-  /**
-   * Poll an asynchronous ListKey response until results arrive or we time out.
-   * Returns the array of CIDs.
-   */
-  async pollListKey(listKey: string, opts: PollListKeyOptions = {}): Promise<number[]> {
-    const intervalMs = opts.intervalMs ?? 2_000;
-    const maxAttempts = opts.maxAttempts ?? 30;
-    const url = buildListKeyPollUrl({
-      baseUrl: this.config.baseUrl,
-      viewBaseUrl: this.config.viewBaseUrl,
-    }, listKey);
-
-    for (let i = 0; i < maxAttempts; i++) {
-      const body = (await this.request(url, {
-        format: 'json',
-        cache: { bypass: true },
-        signal: opts.signal,
-      })) as AsyncWaitingResponse & ListResponse;
-      if (body.IdentifierList?.CID) {
-        return body.IdentifierList.CID;
-      }
-      if (!body.Waiting?.ListKey) {
-        throw new PubChemResponseError(
-          'Unexpected response shape while polling list key',
-          { endpoint: 'compound/listkey' },
-        );
-      }
-      await this.sleep(intervalMs);
-    }
-    throw new PubChemTransientError('List key polling timed out', {
-      endpoint: 'compound/listkey',
-    });
-  }
-
-  private async executeOnce(
-    url: string,
-    format: ResponseFormat,
-    signal: AbortSignal | undefined,
-  ): Promise<unknown> {
+  private async executeOnce(spec: RequestSpec): Promise<unknown> {
     await this.rateLimiter.acquire();
     const backoff = suggestedBackoffMs(this.throttle.current());
     if (backoff > 0) await this.sleep(backoff);
@@ -210,25 +272,30 @@ export class PugRestClient {
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), this.config.timeoutMs);
     const onAbort = () => controller.abort();
-    if (signal) {
-      if (signal.aborted) controller.abort();
-      else signal.addEventListener('abort', onAbort, { once: true });
+    if (spec.signal) {
+      if (spec.signal.aborted) controller.abort();
+      else spec.signal.addEventListener('abort', onAbort, { once: true });
     }
 
     try {
-      const response = await this.fetchImpl(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent': this.userAgent,
-          Accept: format === 'json' ? 'application/json' : '*/*',
-        },
+      const headers: Record<string, string> = {
+        'User-Agent': this.userAgent,
+        Accept: spec.format === 'json' ? 'application/json' : '*/*',
+        ...(spec.headers ?? {}),
+      };
+      const init: RequestInit = {
+        method: spec.method,
+        headers,
         signal: controller.signal,
-      });
+      };
+      if (spec.body !== undefined) init.body = spec.body;
+
+      const response = await this.fetchImpl(spec.url, init);
 
       this.throttle.update(response.headers.get('x-throttling-control'));
 
       if (!response.ok) {
-        await this.consumeAndThrow(response, url);
+        await this.consumeAndThrow(response, spec.url);
       }
 
       const contentType = response.headers.get('content-type') ?? '';
@@ -237,11 +304,11 @@ export class PugRestClient {
         return await response.json();
       }
 
-      if (format === 'json') {
+      if (spec.format === 'json') {
         const text = await response.text();
         if (!text) {
           throw new PubChemResponseError('Empty JSON response', {
-            endpoint: sanitizeEndpoint(url, this.config),
+            endpoint: sanitizeEndpoint(spec.url, this.config),
             status: response.status,
           });
         }
@@ -249,22 +316,25 @@ export class PugRestClient {
         try {
           parsed = JSON.parse(text);
         } catch (err) {
-          throw new PubChemResponseError(`Invalid JSON response: ${(err as Error).message}`, {
-            endpoint: sanitizeEndpoint(url, this.config),
-            status: response.status,
-          });
+          throw new PubChemResponseError(
+            `Invalid JSON response: ${(err as Error).message}`,
+            {
+              endpoint: sanitizeEndpoint(spec.url, this.config),
+              status: response.status,
+            },
+          );
         }
         if (isFaultResponse(parsed) && parsed.Fault) {
           // PubChem returned a 2xx body containing a Fault wrapper.
           const codeRaw = parsed.Fault.Code;
           const code = typeof codeRaw === 'number' ? codeRaw : Number(codeRaw);
           const message = parsed.Fault.Message ?? 'PubChem fault';
-          throw mapFault(message, code, sanitizeEndpoint(url, this.config));
+          throw mapFault(message, code, sanitizeEndpoint(spec.url, this.config));
         }
         return parsed;
       }
 
-      if (format === 'text') {
+      if (spec.format === 'text') {
         return await response.text();
       }
 
@@ -272,7 +342,7 @@ export class PugRestClient {
       return Buffer.from(buf);
     } finally {
       clearTimeout(timeoutHandle);
-      if (signal) signal.removeEventListener('abort', onAbort);
+      if (spec.signal) spec.signal.removeEventListener('abort', onAbort);
     }
   }
 

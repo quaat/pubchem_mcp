@@ -64,6 +64,17 @@ PubChem also returns a `Fault` object inside 2xx bodies for some failure modes; 
 
 In-memory TTL cache, default 24h, LRU-bounded to `PUBCHEM_CACHE_MAX_ENTRIES`. Only successful responses are cached. Disable with `PUBCHEM_CACHE_DISABLE=1`. Cache stats are surfaced by `get_server_status`.
 
+## POST / form-urlencoded input
+
+PubChem documents `POST` with an `application/x-www-form-urlencoded` body as the supported channel for **InChI** input (and for SDF and very large structure queries that would exceed URL length limits). The client exposes this as `postFormJson(url, form)`. It runs through the same pipeline as GET — rate limit, throttle backoff, AbortController timeout, `User-Agent`, `X-Throttling-Control` parsing, exponential-backoff retry, typed error mapping, sanitized endpoint labels — with one difference: **POST responses are never cached**, because the request body is part of the response identity and we do not currently hash it into the cache key.
+
+Currently used for:
+
+- `resolveCompound({ identifierType: 'inchi' })` → `POST /compound/inchi/cids/JSON`
+- `searchStructure({ queryType: 'inchi' })` → `POST /compound/{fastidentity|fastsimilarity_2d|fastsubstructure|fastsuperstructure}/inchi/cids/JSON`
+
+SMILES lookups continue to use path-encoded GET.
+
 ## ListKey async polling
 
 For async structure searches that return `202 Accepted` with `Waiting.ListKey`, the client polls `/compound/listkey/{key}/cids/JSON` every 2s for up to 30 attempts (≈60s). On expiry it throws `PubChemTransientError`.

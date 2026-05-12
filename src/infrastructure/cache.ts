@@ -59,8 +59,15 @@ export class TtlCache<V> {
     return entry.value;
   }
 
-  set(key: string, value: V): void {
+  /**
+   * Store a value. An optional `ttlMs` overrides the cache-wide default for
+   * this entry only — useful when a particular endpoint should be cached
+   * shorter (e.g. an error-prone path) or longer than the global TTL.
+   */
+  set(key: string, value: V, ttlMs?: number): void {
     if (this.disabled) return;
+    const ttl = ttlMs !== undefined ? ttlMs : this.ttlMs;
+    if (ttl <= 0) return; // a per-request ttl of 0 means "don't cache this one"
     if (this.store.has(key)) {
       this.store.delete(key);
     } else if (this.store.size >= this.maxEntries) {
@@ -71,7 +78,7 @@ export class TtlCache<V> {
         this.evictions += 1;
       }
     }
-    this.store.set(key, { value, expiresAt: this.now() + this.ttlMs });
+    this.store.set(key, { value, expiresAt: this.now() + ttl });
   }
 
   delete(key: string): boolean {

@@ -1,3 +1,5 @@
+import { PubChemValidationError } from './pubchemErrors.js';
+
 /**
  * Allowlist of PubChem compound property names we expose. This protects
  * downstream callers from typos and protects PubChem from arbitrary
@@ -107,10 +109,11 @@ export function validateProperties(requested: ReadonlyArray<string>): SupportedP
     result.push(name);
   }
   if (invalid.length > 0) {
-    throw new Error(
+    throw new PubChemValidationError(
       `Unsupported property name(s): ${invalid.join(', ')}. Supported names: ${SUPPORTED_PROPERTIES.join(
         ', ',
       )}`,
+      { endpoint: 'compound/cid/property' },
     );
   }
   return result;

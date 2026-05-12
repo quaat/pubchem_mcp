@@ -2,7 +2,7 @@ import { detectIdentifierType } from '../utils/ids.js';
 import {
   buildCompoundByCidPropertyUrl,
   buildCompoundByFormulaCidsUrl,
-  buildCompoundByInchiCidsUrl,
+  buildCompoundByInchiCidsPostUrl,
   buildCompoundByInchiKeyCidsUrl,
   buildCompoundByNameCidsUrl,
   buildCompoundBySmilesCidsUrl,
@@ -21,6 +21,7 @@ import type {
   NormalizedCompound,
   ResolveCompoundResult,
   ResolveIdentifierType,
+  ResultMetadata,
   StructurePayload,
 } from '../pubchem/pubchemTypes.js';
 import { PubChemNotFoundError } from '../pubchem/pubchemErrors.js';
@@ -31,6 +32,7 @@ interface CidListResponse {
 }
 
 const SDF_MAX_BYTES = 256 * 1024;
+const JSON_MAX_BYTES = 256 * 1024;
 
 export interface ResolveCompoundInput {
   query: string;
@@ -153,12 +155,22 @@ export class CompoundService {
     if (format === 'json') {
       const url = buildCompoundFullRecordUrl(urlConfig(this.ctx.config), cid);
       const raw = await this.ctx.rest.getJson<unknown>(url);
+      const serialized = JSON.stringify(raw);
+      const truncated = serialized.length > JSON_MAX_BYTES;
+      const metaBlock = meta('PUG-REST', { cid, format: 'json' });
+      if (truncated) {
+        metaBlock.warnings = [
+          ...(metaBlock.warnings ?? []),
+          `JSON record truncated to ${JSON_MAX_BYTES} bytes (original ${serialized.length}).`,
+        ];
+      }
       return {
         cid,
         format: 'json',
-        content: JSON.stringify(raw),
+        content: truncated ? serialized.slice(0, JSON_MAX_BYTES) : serialized,
         contentType: 'application/json',
-        _meta: meta('PUG-REST', { cid, format: 'json' }),
+        ...(truncated ? { truncated: true } : {}),
+        _meta: metaBlock,
       };
     }
 
@@ -186,24 +198,7 @@ export class CompoundService {
     query: string,
     limit: number,
   ): Promise<number[]> {
-    const url = (() => {
-      switch (type) {
-        case 'cid':
-          return undefined; // Direct CID; skip lookup.
-        case 'name':
-          return buildCompoundByNameCidsUrl(urlConfig(this.ctx.config), query);
-        case 'smiles':
-          return buildCompoundBySmilesCidsUrl(urlConfig(this.ctx.config), query);
-        case 'inchi':
-          return buildCompoundByInchiCidsUrl(urlConfig(this.ctx.config), query);
-        case 'inchikey':
-          return buildCompoundByInchiKeyCidsUrl(urlConfig(this.ctx.config), query);
-        case 'formula':
-          return buildCompoundByFormulaCidsUrl(urlConfig(this.ctx.config), query);
-      }
-    })();
-
-    if (!url) {
+    if (type === 'cid') {
       const numeric = Number.parseInt(query, 10);
       if (!Number.isFinite(numeric) || numeric <= 0) {
         throw new Error(`Invalid CID: ${query}`);
@@ -213,7 +208,28 @@ export class CompoundService {
 
     let body: CidListResponse;
     try {
-      body = await this.ctx.rest.getJson<CidListResponse>(url);
+      if (type === 'inchi') {
+        // PubChem documents POST/form-urlencoded as the supported channel for
+        // InChI input; path-encoded InChI is fragile for non-trivial values.
+        body = await this.ctx.rest.postFormJson<CidListResponse>(
+          buildCompoundByInchiCidsPostUrl(urlConfig(this.ctx.config)),
+          { inchi: query },
+        );
+      } else {
+        const url = (() => {
+          switch (type) {
+            case 'name':
+              return buildCompoundByNameCidsUrl(urlConfig(this.ctx.config), query);
+            case 'smiles':
+              return buildCompoundBySmilesCidsUrl(urlConfig(this.ctx.config), query);
+            case 'inchikey':
+              return buildCompoundByInchiKeyCidsUrl(urlConfig(this.ctx.config), query);
+            case 'formula':
+              return buildCompoundByFormulaCidsUrl(urlConfig(this.ctx.config), query);
+          }
+        })();
+        body = await this.ctx.rest.getJson<CidListResponse>(url);
+      }
     } catch (err) {
       if (err instanceof PubChemNotFoundError) return [];
       throw err;
@@ -237,9 +253,9 @@ export class CompoundService {
   }
 }
 
-function meta(backend: 'PUG-REST' | 'PUG-View', query: unknown) {
+function meta(backend: 'PUG-REST' | 'PUG-View', query: unknown): ResultMetadata {
   return {
-    source: 'PubChem' as const,
+    source: 'PubChem',
     backend,
     retrievedAt: nowIso(),
     query,

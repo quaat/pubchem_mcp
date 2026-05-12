@@ -86,11 +86,13 @@ npm test
 npm start          # runs dist/index.js (stdio)
 ```
 
-Live integration tests (which call the real PubChem API) are skipped by default. Run them with:
+Live integration tests (which call the real PubChem API) are skipped by default. They require outbound DNS+HTTPS access to `pubchem.ncbi.nlm.nih.gov`; sandboxed environments without network access should leave the flag unset. Run them with:
 
 ```bash
 PUBCHEM_MCP_LIVE_TESTS=1 npm test
 ```
+
+If a live test fails, the assertion message includes the full structured tool-error payload (`error`, `category`, `retryable`, `endpoint`) — diagnose from that rather than re-running blindly.
 
 ## Tools
 
@@ -167,11 +169,14 @@ See [`docs/safety-and-limitations.md`](docs/safety-and-limitations.md).
 
 ## Troubleshooting
 
-- **`503 Service Unavailable`** — PubChem is throttling. The client retries automatically; if it persists, reduce `PUBCHEM_RPS` and re-run.
+- **`503 Service Unavailable`** — PubChem is throttling. The client retries automatically with exponential backoff; if it persists, reduce `PUBCHEM_RPS` (default 4, hard cap 5) and `PUBCHEM_RPM`. Watch `get_server_status` for the parsed `X-Throttling-Control` color.
+- **`Persistent yellow/red throttle status`** — your traffic is steadily near PubChem's window. Lower `PUBCHEM_RPS` to 2–3 and add a longer delay between bursts. Set `PUBCHEM_CONTACT_URL` to a project URL so PubChem operators can identify your traffic.
 - **`List key polling timed out`** — a large async structure search exceeded the 60s polling budget. Reduce the result set or use a `fast*` (synchronous) search.
-- **`Unsupported property name(s)`** — `get_compound_properties` rejects values outside the allowlist. The error message lists every supported name.
+- **`Unsupported property name(s)`** — `get_compound_properties` rejects values outside the allowlist; the error returns `category: "validation"`, `retryable: false`, and lists every supported name.
+- **InChI lookup returns `400 Bad Request`** — InChI lookups are sent as `POST /compound/inchi/cids/JSON` with a form-urlencoded body. If you see a 400, the InChI string itself is malformed; path-encoded InChI is no longer used. Validate the InChI with an external InChI parser before resubmitting.
 - **MCP server appears to "hang" on startup** — stdio servers wait silently for an `initialize` frame; this is normal behavior for stdio MCP servers. Pair it with a client.
 - **No data returned for a compound annotation heading** — PubChem may not have that section for that compound. The server will not fabricate one.
+- **Live test failures with `Cannot read properties of undefined`** — this used to happen when network was unavailable; live tests now include the full MCP error payload in the assertion message. If you see DNS/network errors, leave `PUBCHEM_MCP_LIVE_TESTS` unset on hosts without outbound HTTPS to `pubchem.ncbi.nlm.nih.gov`.
 
 ## License
 

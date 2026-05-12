@@ -96,15 +96,23 @@ describe('MCP server end-to-end', () => {
     expect(result.isError).toBe(true);
   });
 
-  it('get_compound_properties rejects unsupported property names', async () => {
+  it('get_compound_properties rejects unsupported property names with typed validation error', async () => {
     const { client } = await bootServer();
     const result = await client.callTool({
       name: 'get_compound_properties',
       arguments: { cids: [2244], properties: ['LethalDose'] },
     });
     expect(result.isError).toBe(true);
-    const payload = parseToolResult(result as { content: unknown }) as { error: string };
+    const payload = parseToolResult(result as { content: unknown }) as {
+      error: string;
+      category?: string;
+      retryable?: boolean;
+      endpoint?: string;
+    };
     expect(payload.error).toMatch(/Unsupported property/);
+    expect(payload.category).toBe('validation');
+    expect(payload.retryable).toBe(false);
+    expect(payload.endpoint).toBeDefined();
   });
 
   it('get_server_status reports diagnostics including configured limits', async () => {

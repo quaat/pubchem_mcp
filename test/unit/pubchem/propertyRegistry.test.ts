@@ -5,6 +5,7 @@ import {
   isSupportedProperty,
   validateProperties,
 } from '../../../src/pubchem/propertyRegistry.js';
+import { PubChemValidationError } from '../../../src/pubchem/pubchemErrors.js';
 
 describe('propertyRegistry', () => {
   it('exposes the default property set within the supported list', () => {
@@ -23,18 +24,21 @@ describe('propertyRegistry', () => {
     expect(out).toEqual(['XLogP', 'MolecularWeight']);
   });
 
-  it('validateProperties throws with the supported list in the message', () => {
+  it('validateProperties throws PubChemValidationError with the supported list', () => {
     try {
       validateProperties(['LethalDose', 'MolecularWeight']);
       throw new Error('expected throw');
     } catch (err) {
-      expect((err as Error).message).toMatch(/LethalDose/);
-      expect((err as Error).message).toMatch(/MolecularWeight/);
-      expect((err as Error).message).toMatch(/Supported names:/);
+      expect(err).toBeInstanceOf(PubChemValidationError);
+      const ve = err as PubChemValidationError;
+      expect(ve.category).toBe('validation');
+      expect(ve.retryable).toBe(false);
+      expect(ve.message).toMatch(/LethalDose/);
+      expect(ve.message).toMatch(/Supported names:/);
     }
   });
 
-  it('rejects empty strings', () => {
-    expect(() => validateProperties([''])).toThrow();
+  it('rejects empty strings as a validation error', () => {
+    expect(() => validateProperties([''])).toThrow(PubChemValidationError);
   });
 });

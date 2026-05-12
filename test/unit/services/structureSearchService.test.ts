@@ -51,6 +51,29 @@ describe('StructureSearchService', () => {
     ).rejects.toBeInstanceOf(PubChemValidationError);
   });
 
+  it('uses POST form body for InChI searches', async () => {
+    let postBody: string | undefined;
+    server.use(
+      http.post(`${TEST_BASE}/compound/fastsubstructure/inchi/cids/JSON`, async ({ request }) => {
+        postBody = await request.text();
+        return HttpResponse.json({ IdentifierList: { CID: [2244] } });
+      }),
+      http.get(`${TEST_BASE}/compound/cid/2244/property/*`, () =>
+        HttpResponse.json({
+          PropertyTable: { Properties: [{ CID: 2244, MolecularFormula: 'C9H8O4' }] },
+        }),
+      ),
+    );
+    const svc = new StructureSearchService(makeServiceContext());
+    const r = await svc.search({
+      query: 'InChI=1S/C9H8O4',
+      queryType: 'inchi',
+      searchType: 'substructure',
+    });
+    expect(r.totalHits).toBe(1);
+    expect(postBody).toMatch(/^inchi=InChI%3D1S/);
+  });
+
   it('polls a ListKey for async searches', async () => {
     let polls = 0;
     server.use(

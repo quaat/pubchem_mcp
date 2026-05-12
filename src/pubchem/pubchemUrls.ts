@@ -57,14 +57,60 @@ export function buildCompoundByInchiKeyCidsUrl(
   return `${cfg.baseUrl}/compound/inchikey/${enc(inchiKey)}/cids/${format}`;
 }
 
+/**
+ * @deprecated Path-encoded InChI lookups are brittle for non-trivial InChI
+ * strings. Prefer `buildCompoundByInchiCidsPostUrl` + POST form body.
+ */
 export function buildCompoundByInchiCidsUrl(
   cfg: UrlBuilderConfig,
   inchi: string,
   format: RestOutputFormat = 'JSON',
 ): string {
-  // InChI is submitted as a POST-style query string per PubChem docs, but the
-  // GET path with URL-encoded value works for typical strings. We URL-encode.
   return `${cfg.baseUrl}/compound/inchi/${enc(inchi)}/cids/${format}`;
+}
+
+/**
+ * POST endpoint for InChI → CIDs. The InChI string is submitted as the
+ * `inchi` field of an application/x-www-form-urlencoded body, which PubChem
+ * documents as the supported channel for InChI input.
+ */
+export function buildCompoundByInchiCidsPostUrl(
+  cfg: UrlBuilderConfig,
+  format: RestOutputFormat = 'JSON',
+): string {
+  return `${cfg.baseUrl}/compound/inchi/cids/${format}`;
+}
+
+/**
+ * POST endpoint for structure search by InChI. Use with form body `inchi=<value>`.
+ * `searchType` selects the synchronous `fast*` variant by default.
+ */
+export function buildStructureSearchInchiPostUrl(
+  cfg: UrlBuilderConfig,
+  searchType: 'identity' | 'similarity_2d' | 'substructure' | 'superstructure',
+  opts: { threshold?: number; maxRecords?: number; preferFast?: boolean } = {},
+): string {
+  const sync = opts.preferFast !== false;
+  const op = (() => {
+    switch (searchType) {
+      case 'identity':
+        return sync ? 'fastidentity' : 'identity';
+      case 'similarity_2d':
+        return sync ? 'fastsimilarity_2d' : 'similarity_2d';
+      case 'substructure':
+        return sync ? 'fastsubstructure' : 'substructure';
+      case 'superstructure':
+        return sync ? 'fastsuperstructure' : 'superstructure';
+    }
+  })();
+  const params = new URLSearchParams();
+  if (searchType === 'similarity_2d' && opts.threshold !== undefined) {
+    params.set('Threshold', String(opts.threshold));
+  }
+  if (opts.maxRecords !== undefined) params.set('MaxRecords', String(opts.maxRecords));
+  const qs = params.toString();
+  const path = `${cfg.baseUrl}/compound/${op}/inchi/cids/JSON`;
+  return qs ? `${path}?${qs}` : path;
 }
 
 export function buildCompoundByFormulaCidsUrl(
