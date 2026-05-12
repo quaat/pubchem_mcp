@@ -5,10 +5,12 @@ import {
   buildCompoundByInchiCidsPostUrl,
   buildCompoundByInchiKeyCidsUrl,
   buildCompoundByNameCidsUrl,
+  buildCompoundBySmilesCidsPostUrl,
   buildCompoundBySmilesCidsUrl,
   buildCompoundFullRecordUrl,
   buildCompoundSdfUrl,
   publicCompoundUrl,
+  shouldUseSmilesPost,
 } from '../pubchem/pubchemUrls.js';
 import {
   COMPACT_PROPERTIES,
@@ -214,6 +216,13 @@ export class CompoundService {
         body = await this.ctx.rest.postFormJson<CidListResponse>(
           buildCompoundByInchiCidsPostUrl(urlConfig(this.ctx.config)),
           { inchi: query },
+        );
+      } else if (type === 'smiles' && shouldUseSmilesPost(query)) {
+        // Complex SMILES (containing URL-reserved characters or very long
+        // strings) are sent via POST per PubChem's tutorial guidance.
+        body = await this.ctx.rest.postFormJson<CidListResponse>(
+          buildCompoundBySmilesCidsPostUrl(urlConfig(this.ctx.config)),
+          { smiles: query },
         );
       } else {
         const url = (() => {

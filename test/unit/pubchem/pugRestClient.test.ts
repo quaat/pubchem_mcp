@@ -16,6 +16,7 @@ import {
   PubChemUnsupportedOperationError,
   PubChemValidationError,
 } from '../../../src/pubchem/pubchemErrors.js';
+// `PubChemTransientError` is re-asserted on across multiple suites below.
 import { loadConfig } from '../../../src/infrastructure/config.js';
 import { createLogger } from '../../../src/infrastructure/logger.js';
 
@@ -350,6 +351,123 @@ describe('PugRestClient POST/form support', () => {
     expect(a.IdentifierList.CID).toEqual([1]);
     expect(b.IdentifierList.CID).toEqual([2]);
     expect(calls).toBe(2);
+  });
+});
+
+describe('PugRestClient transport error normalization', () => {
+  function makeClientWithFetch(fetchImpl: typeof fetch, maxRetries = 2, timeoutMs = 5000) {
+    const config = loadConfig({
+      PUBCHEM_BASE_URL: BASE,
+      PUBCHEM_VIEW_BASE_URL: VIEW,
+      PUBCHEM_LOG_LEVEL: 'silent',
+      PUBCHEM_TIMEOUT_MS: String(timeoutMs),
+      PUBCHEM_MAX_RETRIES: String(maxRetries),
+    } as NodeJS.ProcessEnv);
+    return new PugRestClient({
+      config,
+      cache: new TtlCache<CachedEntry>({ ttlMs: 60_000, maxEntries: 100 }),
+      logger: createLogger({ logLevel: 'silent' }),
+      rateLimiter: new RateLimiter({ rps: 100, rpm: 240, sleep: async () => undefined }),
+      throttle: new ThrottleStateTracker(),
+      sleep: async () => undefined,
+      random: () => 0.5,
+      userAgentVersion: '0.0.0-test',
+      fetchImpl,
+    });
+  }
+
+  function makeDnsError(): Error {
+    // Mirrors what Node's fetch surfaces for DNS failures.
+    const cause = new Error('getaddrinfo ENOTFOUND pubchem.invalid');
+    (cause as Error & { code?: string }).code = 'ENOTFOUND';
+    const err = new TypeError('fetch failed');
+    (err as TypeError & { cause?: unknown }).cause = cause;
+    return err;
+  }
+
+  it('converts GET network failure after retries to PubChemTransientError', async () => {
+    let attempts = 0;
+    const fetchImpl: typeof fetch = async () => {
+      attempts += 1;
+      throw makeDnsError();
+    };
+    const client = makeClientWithFetch(fetchImpl, 3);
+    try {
+      await client.getJson(`${BASE}/compound/cid/2244/property/MolecularWeight/JSON`);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(PubChemTransientError);
+      const te = err as PubChemTransientError;
+      expect(te.category).toBe('transient');
+      expect(te.retryable).toBe(true);
+      expect(te.endpoint).toBe('compound/cid/2244');
+      expect(te.message).toMatch(/Network error/i);
+      expect(te.message).toMatch(/ENOTFOUND/);
+      // Should not leak the raw URL into the message.
+      expect(te.message).not.toContain(BASE);
+    }
+    expect(attempts).toBe(3);
+  });
+
+  it('converts POST network failure after retries to PubChemTransientError', async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw makeDnsError();
+    };
+    const client = makeClientWithFetch(fetchImpl, 2);
+    await expect(
+      client.postFormJson(`${BASE}/compound/inchi/cids/JSON`, { inchi: 'X' }),
+    ).rejects.toBeInstanceOf(PubChemTransientError);
+  });
+
+  it('maps AbortError (timeout) to PubChemTransientError with timeout message', async () => {
+    const fetchImpl: typeof fetch = async () => {
+      const err = new Error('aborted');
+      err.name = 'AbortError';
+      throw err;
+    };
+    const client = makeClientWithFetch(fetchImpl, 1, 7500);
+    try {
+      await client.getJson(`${BASE}/compound/cid/2244/property/MolecularWeight/JSON`);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(PubChemTransientError);
+      const te = err as PubChemTransientError;
+      expect(te.message).toMatch(/timed out after 7500ms/i);
+      expect(te.endpoint).toBe('compound/cid/2244');
+    }
+  });
+
+  it('does not double-wrap an already-typed PubChemError', async () => {
+    server.use(
+      http.get(`${BASE}/compound/cid/9999999/property/MolecularFormula/JSON`, () =>
+        HttpResponse.json({ Fault: { Code: 404, Message: 'no match' } }, { status: 404 }),
+      ),
+    );
+    const client = makeClient();
+    try {
+      await client.getJson(`${BASE}/compound/cid/9999999/property/MolecularFormula/JSON`);
+      throw new Error('expected throw');
+    } catch (err) {
+      // Must remain the original PubChemNotFoundError, not a wrapped transient.
+      expect(err).toBeInstanceOf(PubChemNotFoundError);
+      expect(err).not.toBeInstanceOf(PubChemTransientError);
+    }
+  });
+
+  it('attaches the original cause but keeps it out of the user-facing message', async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw makeDnsError();
+    };
+    const client = makeClientWithFetch(fetchImpl, 1);
+    try {
+      await client.getJson(`${BASE}/compound/cid/2244/property/MolecularWeight/JSON`);
+      throw new Error('expected throw');
+    } catch (err) {
+      const te = err as PubChemTransientError & { cause?: unknown };
+      expect(te.cause).toBeDefined();
+      // The cause is a TypeError; we don't surface its stack via the message.
+      expect(te.message).not.toMatch(/\n {2}at /);
+    }
   });
 });
 

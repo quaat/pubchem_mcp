@@ -176,7 +176,7 @@ See [`docs/safety-and-limitations.md`](docs/safety-and-limitations.md).
 - **InChI lookup returns `400 Bad Request`** — InChI lookups are sent as `POST /compound/inchi/cids/JSON` with a form-urlencoded body. If you see a 400, the InChI string itself is malformed; path-encoded InChI is no longer used. Validate the InChI with an external InChI parser before resubmitting.
 - **MCP server appears to "hang" on startup** — stdio servers wait silently for an `initialize` frame; this is normal behavior for stdio MCP servers. Pair it with a client.
 - **No data returned for a compound annotation heading** — PubChem may not have that section for that compound. The server will not fabricate one.
-- **Live test failures with `Cannot read properties of undefined`** — this used to happen when network was unavailable; live tests now include the full MCP error payload in the assertion message. If you see DNS/network errors, leave `PUBCHEM_MCP_LIVE_TESTS` unset on hosts without outbound HTTPS to `pubchem.ncbi.nlm.nih.gov`.
+- **Live test failures when network is unavailable** — transport failures (DNS, TLS, refused, reset, timeout) are mapped to a typed `PubChemTransientError` and surface in MCP tool payloads as `{ "category": "transient", "retryable": true, "endpoint": "...", "error": "Network error while contacting PubChem (ENOTFOUND)" | "PubChem request timed out after Nms" }`. The live test suite uses a short timeout (10 s) and a low retry cap (2) so the suite completes within ~60 s on hosts without HTTPS to `pubchem.ncbi.nlm.nih.gov`, and every test closes its MCP client+server transports in `finally`. Leave `PUBCHEM_MCP_LIVE_TESTS` unset on offline hosts.
 
 ## License
 

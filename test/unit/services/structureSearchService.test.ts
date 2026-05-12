@@ -51,6 +51,29 @@ describe('StructureSearchService', () => {
     ).rejects.toBeInstanceOf(PubChemValidationError);
   });
 
+  it('routes complex SMILES searches through POST form body', async () => {
+    let postBody: string | undefined;
+    server.use(
+      http.post(`${TEST_BASE}/compound/fastsubstructure/smiles/cids/JSON`, async ({ request }) => {
+        postBody = await request.text();
+        return HttpResponse.json({ IdentifierList: { CID: [241] } });
+      }),
+      http.get(`${TEST_BASE}/compound/cid/241/property/*`, () =>
+        HttpResponse.json({ PropertyTable: { Properties: [{ CID: 241 }] } }),
+      ),
+    );
+    const svc = new StructureSearchService(makeServiceContext());
+    // Long SMILES triggers POST.
+    const longSmiles = 'C'.repeat(300);
+    const r = await svc.search({
+      query: longSmiles,
+      queryType: 'smiles',
+      searchType: 'substructure',
+    });
+    expect(r.totalHits).toBe(1);
+    expect(postBody).toMatch(/^smiles=C{300}/);
+  });
+
   it('uses POST form body for InChI searches', async () => {
     let postBody: string | undefined;
     server.use(

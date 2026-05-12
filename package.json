@@ -4,7 +4,18 @@
   "description": "Production-ready Model Context Protocol server for PubChem chemical data (PUG-REST + PUG-View).",
   "type": "module",
   "license": "MIT",
-  "author": "",
+  "author": "Thomas F. Hagelien <thomas@quaat.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quaat/pubchem-mcp.git"
+  },
+  "homepage": "https://github.com/quaat/pubchem-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/quaat/pubchem-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "mcp",
     "model-context-protocol",

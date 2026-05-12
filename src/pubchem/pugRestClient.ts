@@ -233,35 +233,36 @@ export class PugRestClient {
   // -------- Internal: shared request pipeline ---------------------------
 
   private async requestPipelined(spec: RequestSpec): Promise<unknown> {
-    return withRetry(() => this.executeOnce(spec), {
-      maxAttempts: Math.max(1, this.config.maxRetries),
-      baseDelayMs: 500,
-      maxDelayMs: 16_000,
-      jitter: 0.2,
-      sleep: this.sleep,
-      random: this.random,
-      shouldRetry: (err) => {
-        if (err instanceof PubChemError) return err.retryable;
-        // Network errors (TypeError from fetch, AbortError for timeout) are retryable.
-        if (err instanceof Error) {
-          if (err.name === 'AbortError') return true;
-          if (err.name === 'TypeError') return true;
-          if ((err as { code?: string }).code === 'ECONNRESET') return true;
-        }
-        return false;
-      },
-      onRetry: (err, attempt, delayMs) => {
-        this.logger.debug(
-          {
-            attempt,
-            delayMs,
-            method: spec.method,
-            endpoint: sanitizeEndpoint(spec.url, this.config),
-          },
-          `retrying after error: ${(err as Error).message}`,
-        );
-      },
-    });
+    try {
+      return await withRetry(() => this.executeOnce(spec), {
+        maxAttempts: Math.max(1, this.config.maxRetries),
+        baseDelayMs: 500,
+        maxDelayMs: 16_000,
+        jitter: 0.2,
+        sleep: this.sleep,
+        random: this.random,
+        shouldRetry: (err) => {
+          if (err instanceof PubChemError) return err.retryable;
+          return isRetryableTransportError(err);
+        },
+        onRetry: (err, attempt, delayMs) => {
+          this.logger.debug(
+            {
+              attempt,
+              delayMs,
+              method: spec.method,
+              endpoint: sanitizeEndpoint(spec.url, this.config),
+            },
+            `retrying after error: ${(err as Error).message}`,
+          );
+        },
+      });
+    } catch (err) {
+      // Convert exhausted network/timeout failures into typed transient errors
+      // so MCP clients get the same `{category, retryable, endpoint}` contract
+      // they get for HTTP failures. Already-typed errors pass through.
+      throw normalizeTransportError(err, spec, this.config);
+    }
   }
 
   private async executeOnce(spec: RequestSpec): Promise<unknown> {
@@ -386,6 +387,99 @@ export class PugRestClient {
     }
     throw new PubChemResponseError(message, { endpoint, status });
   }
+}
+
+/** Node.js network error codes we treat as transient and worth retrying. */
+const RETRYABLE_NETWORK_CODES = new Set([
+  'ENOTFOUND',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EAGAIN',
+]);
+
+function errorCode(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const code = (err as Error & { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+  }
+  return undefined;
+}
+
+/**
+ * Walk the cause chain looking for a node:net-style error code. `fetch failed`
+ * exceptions typically wrap an underlying `Error` with `code: 'ENOTFOUND'` etc.
+ */
+function findCauseCode(err: unknown, depth = 0): string | undefined {
+  if (depth > 5 || err == null) return undefined;
+  const direct = errorCode(err);
+  if (direct) return direct;
+  if (err instanceof Error && 'cause' in err) {
+    return findCauseCode((err as { cause?: unknown }).cause, depth + 1);
+  }
+  return undefined;
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
+function isFetchFailure(err: unknown): boolean {
+  // Native fetch throws `TypeError: fetch failed` (with .cause set to the
+  // underlying network error) when DNS/TLS/connection fails.
+  return err instanceof TypeError;
+}
+
+export function isRetryableTransportError(err: unknown): boolean {
+  if (isAbortError(err)) return true;
+  if (isFetchFailure(err)) return true;
+  const code = findCauseCode(err);
+  return code !== undefined && RETRYABLE_NETWORK_CODES.has(code);
+}
+
+/**
+ * Convert a raw fetch/abort error into a typed `PubChemTransientError`.
+ * Already-typed `PubChemError`s pass through unchanged. The original error is
+ * attached as `cause` for logging without leaking it into MCP responses.
+ */
+export function normalizeTransportError(
+  err: unknown,
+  spec: { url: string; method: 'GET' | 'POST' },
+  config: Pick<Config, 'baseUrl' | 'viewBaseUrl' | 'timeoutMs'>,
+): unknown {
+  if (err instanceof PubChemError) return err;
+
+  const endpoint = sanitizeEndpoint(spec.url, config);
+
+  if (isAbortError(err)) {
+    return new PubChemTransientError(
+      `PubChem request timed out after ${config.timeoutMs}ms`,
+      { endpoint, cause: err },
+    );
+  }
+
+  const code = findCauseCode(err);
+  if (isFetchFailure(err) || code !== undefined) {
+    const detail = code ? ` (${code})` : '';
+    return new PubChemTransientError(
+      `Network error while contacting PubChem${detail}`,
+      { endpoint, cause: err },
+    );
+  }
+
+  // Fallthrough: unexpected error type. Surface as transient so the contract
+  // remains consistent, but tag the message so it's debuggable.
+  if (err instanceof Error) {
+    return new PubChemTransientError(
+      `Unexpected transport error while contacting PubChem: ${err.message}`,
+      { endpoint, cause: err },
+    );
+  }
+  return err;
 }
 
 function mapFault(message: string, code: number, endpoint: string): PubChemError {

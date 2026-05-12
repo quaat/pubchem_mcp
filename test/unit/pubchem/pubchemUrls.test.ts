@@ -14,6 +14,7 @@ import {
   buildStructureSearchUrl,
   publicAssayUrl,
   publicCompoundUrl,
+  shouldUseSmilesPost,
 } from '../../../src/pubchem/pubchemUrls.js';
 
 const cfg = {
@@ -106,6 +107,23 @@ describe('pubchemUrls', () => {
     expect(buildPugViewCompoundUrl(cfg, 2244, 'Experimental Properties')).toContain(
       'heading=Experimental+Properties',
     );
+  });
+
+  it('shouldUseSmilesPost routes simple SMILES to GET and complex ones to POST', () => {
+    // Simple
+    expect(shouldUseSmilesPost('CCO')).toBe(false);
+    expect(shouldUseSmilesPost('CC(=O)O')).toBe(false);
+    expect(shouldUseSmilesPost('c1ccccc1')).toBe(false);
+    // Risky characters
+    expect(shouldUseSmilesPost('C/C=C/C')).toBe(true);          // forward slash
+    expect(shouldUseSmilesPost('C\\C=C\\C')).toBe(true);        // backslash
+    expect(shouldUseSmilesPost('[NH4+]')).toBe(true);           // plus
+    expect(shouldUseSmilesPost('C#N#C')).toBe(true);            // hash
+    expect(shouldUseSmilesPost('C&C')).toBe(true);
+    expect(shouldUseSmilesPost('C%10CCCCCC%10')).toBe(true);    // percent
+    // Long
+    const long = 'C'.repeat(300);
+    expect(shouldUseSmilesPost(long)).toBe(true);
   });
 
   it('builds public web URLs', () => {

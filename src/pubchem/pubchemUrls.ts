@@ -49,6 +49,64 @@ export function buildCompoundBySmilesCidsUrl(
   return `${cfg.baseUrl}/compound/smiles/${enc(smiles)}/cids/${format}`;
 }
 
+/**
+ * POST endpoint for SMILES → CIDs. Use when the SMILES contains URL-risky
+ * characters (`#`, `/`, `\`, `+`, `?`, `&`, `%`) or is very long; PubChem's
+ * tutorial recommends form input in those cases.
+ */
+export function buildCompoundBySmilesCidsPostUrl(
+  cfg: UrlBuilderConfig,
+  format: RestOutputFormat = 'JSON',
+): string {
+  return `${cfg.baseUrl}/compound/smiles/cids/${format}`;
+}
+
+/**
+ * POST endpoint for structure search by SMILES. Use with form body
+ * `smiles=<value>` for complex SMILES inputs.
+ */
+export function buildStructureSearchSmilesPostUrl(
+  cfg: UrlBuilderConfig,
+  searchType: 'identity' | 'similarity_2d' | 'substructure' | 'superstructure',
+  opts: { threshold?: number; maxRecords?: number; preferFast?: boolean } = {},
+): string {
+  const sync = opts.preferFast !== false;
+  const op = (() => {
+    switch (searchType) {
+      case 'identity':
+        return sync ? 'fastidentity' : 'identity';
+      case 'similarity_2d':
+        return sync ? 'fastsimilarity_2d' : 'similarity_2d';
+      case 'substructure':
+        return sync ? 'fastsubstructure' : 'substructure';
+      case 'superstructure':
+        return sync ? 'fastsuperstructure' : 'superstructure';
+    }
+  })();
+  const params = new URLSearchParams();
+  if (searchType === 'similarity_2d' && opts.threshold !== undefined) {
+    params.set('Threshold', String(opts.threshold));
+  }
+  if (opts.maxRecords !== undefined) params.set('MaxRecords', String(opts.maxRecords));
+  const qs = params.toString();
+  const path = `${cfg.baseUrl}/compound/${op}/smiles/cids/JSON`;
+  return qs ? `${path}?${qs}` : path;
+}
+
+/** URL-reserved characters that PubChem's SMILES path parser tends to mishandle. */
+const SMILES_RISKY = /[#/\\+?&%]/;
+const SMILES_LONG_THRESHOLD = 256;
+
+/**
+ * Decide whether a SMILES string should be sent via POST/form body instead of
+ * path-encoded GET. Conservative: simple SMILES continue to use GET; long or
+ * URL-risky strings switch to POST.
+ */
+export function shouldUseSmilesPost(smiles: string): boolean {
+  if (smiles.length > SMILES_LONG_THRESHOLD) return true;
+  return SMILES_RISKY.test(smiles);
+}
+
 export function buildCompoundByInchiKeyCidsUrl(
   cfg: UrlBuilderConfig,
   inchiKey: string,

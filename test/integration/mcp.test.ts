@@ -16,7 +16,7 @@ beforeAll(() => mock.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => mock.resetHandlers());
 afterAll(() => mock.close());
 
-async function bootServer() {
+async function bootServer(extra?: { fetchImpl?: typeof fetch }) {
   const config = loadConfig({
     PUBCHEM_BASE_URL: BASE,
     PUBCHEM_VIEW_BASE_URL: VIEW,
@@ -25,7 +25,12 @@ async function bootServer() {
     PUBCHEM_MAX_RETRIES: '1',
   } as NodeJS.ProcessEnv);
   const logger = createLogger({ logLevel: 'silent' });
-  const created = createServer({ config, logger, sleep: async () => undefined });
+  const created = createServer({
+    config,
+    logger,
+    sleep: async () => undefined,
+    ...(extra?.fetchImpl ? { fetchImpl: extra.fetchImpl } : {}),
+  });
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   await created.server.connect(serverTransport);
   const client = new Client({ name: 'test-client', version: '0.0.0' });
@@ -189,6 +194,38 @@ describe('MCP server end-to-end', () => {
     const text = (r.messages[0]?.content as { type: 'text'; text: string }).text;
     expect(text).toMatch(/PubChem/);
     expect(text).toMatch(/aspirin/);
+  });
+
+  it('network failure surfaces as a typed transient error in tool payload', async () => {
+    // Inject a fetch that always fails with a node-style DNS error. The MCP
+    // tool layer should still return a structured payload — no raw stack, no
+    // raw URL — with category/retryable/endpoint fields populated.
+    const failingFetch: typeof fetch = async () => {
+      const cause = new Error('getaddrinfo ENOTFOUND pubchem.test');
+      (cause as Error & { code?: string }).code = 'ENOTFOUND';
+      const err = new TypeError('fetch failed');
+      (err as TypeError & { cause?: unknown }).cause = cause;
+      throw err;
+    };
+    const { client } = await bootServer({ fetchImpl: failingFetch });
+    const result = await client.callTool({
+      name: 'resolve_compound',
+      arguments: { query: 'aspirin' },
+    });
+    expect(result.isError).toBe(true);
+    const payload = parseToolResult(result as { content: unknown }) as {
+      error: string;
+      category?: string;
+      retryable?: boolean;
+      endpoint?: string;
+    };
+    expect(payload.category).toBe('transient');
+    expect(payload.retryable).toBe(true);
+    expect(payload.endpoint).toBeDefined();
+    expect(payload.endpoint).not.toContain('https://');
+    expect(payload.error).toMatch(/Network error/i);
+    // Sanity: no stack trace leaked into the user-facing error.
+    expect(payload.error).not.toMatch(/\n {2}at /);
   });
 
   it('annotations tool returns structured sections with provenance', async () => {

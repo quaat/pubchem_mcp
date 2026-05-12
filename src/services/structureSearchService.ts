@@ -6,8 +6,10 @@ import type { StructureSearchResult } from '../pubchem/pubchemTypes.js';
 import {
   buildCompoundByCidPropertyUrl,
   buildStructureSearchInchiPostUrl,
+  buildStructureSearchSmilesPostUrl,
   buildStructureSearchUrl,
   publicCompoundUrl,
+  shouldUseSmilesPost,
 } from '../pubchem/pubchemUrls.js';
 import { COMPACT_PROPERTIES } from '../pubchem/propertyRegistry.js';
 import { normalizePropertyTable, type RawPropertyTable } from '../utils/normalize.js';
@@ -51,6 +53,18 @@ export class StructureSearchService {
         },
       );
       body = await this.ctx.rest.postFormJson<WaitingOrList>(url, { inchi: query });
+    } else if (input.queryType === 'smiles' && shouldUseSmilesPost(query)) {
+      // Complex SMILES → POST form body.
+      const url = buildStructureSearchSmilesPostUrl(
+        urlConfig(this.ctx.config),
+        input.searchType,
+        {
+          ...(input.searchType === 'similarity_2d' ? { threshold: threshold ?? 90 } : {}),
+          maxRecords: limit,
+          preferFast: true,
+        },
+      );
+      body = await this.ctx.rest.postFormJson<WaitingOrList>(url, { smiles: query });
     } else {
       const url = buildStructureSearchUrl(urlConfig(this.ctx.config), {
         queryType: input.queryType,

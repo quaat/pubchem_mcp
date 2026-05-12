@@ -90,6 +90,43 @@ describe('CompoundService.resolveCompound', () => {
   });
 });
 
+describe('CompoundService.resolveCompound SMILES POST flow for complex inputs', () => {
+  it('keeps simple SMILES on path-encoded GET', async () => {
+    server.use(
+      http.get(`${TEST_BASE}/compound/smiles/CCO/cids/JSON`, () =>
+        HttpResponse.json({ IdentifierList: { CID: [702] } }),
+      ),
+      http.get(`${TEST_BASE}/compound/cid/702/property/*`, () =>
+        HttpResponse.json({ PropertyTable: { Properties: [{ CID: 702 }] } }),
+      ),
+    );
+    const svc = new CompoundService(makeServiceContext());
+    const r = await svc.resolveCompound({ query: 'CCO', identifierType: 'smiles' });
+    expect(r.candidates[0]!.cid).toBe(702);
+  });
+
+  it('routes SMILES containing reserved URL characters through POST', async () => {
+    let postBody: string | undefined;
+    server.use(
+      http.post(`${TEST_BASE}/compound/smiles/cids/JSON`, async ({ request }) => {
+        postBody = await request.text();
+        return HttpResponse.json({ IdentifierList: { CID: [12345] } });
+      }),
+      http.get(`${TEST_BASE}/compound/cid/12345/property/*`, () =>
+        HttpResponse.json({ PropertyTable: { Properties: [{ CID: 12345 }] } }),
+      ),
+    );
+    const svc = new CompoundService(makeServiceContext());
+    // Forward slash is one of the risky characters that triggers POST.
+    const r = await svc.resolveCompound({
+      query: 'C/C=C/C',
+      identifierType: 'smiles',
+    });
+    expect(r.candidates[0]!.cid).toBe(12345);
+    expect(postBody).toMatch(/^smiles=C(%2F|\/)C%3DC(%2F|\/)C$/);
+  });
+});
+
 describe('CompoundService.resolveCompound InChI POST flow', () => {
   it('submits InChI as a POST form body, not in the URL path', async () => {
     let postBody: string | undefined;

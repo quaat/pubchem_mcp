@@ -5,9 +5,14 @@ Run these steps before tagging and publishing a new version of `pubchem-mcp`.
 ## Pre-flight
 
 - [ ] Working tree is clean (`git status` shows no uncommitted changes).
+- [ ] Replace every `TODO-*` placeholder in `package.json` (`author`, `repository.url`, `homepage`, `bugs.url`) — see [`PUBLISHING.md`](../PUBLISHING.md).
 - [ ] Update `version` in `package.json` per semver (`major.minor.patch`).
   - `src/version.ts` reads from `package.json` at runtime, so no separate constant to update.
-- [ ] Update `CHANGELOG.md` (or release notes) with user-facing changes.
+- [ ] Update `CHANGELOG.md` with user-facing changes for this version.
+- [ ] Confirm the npm name is free or owned by you:
+  ```bash
+  npm view pubchem-mcp --registry=https://registry.npmjs.org/
+  ```
 
 ## Build & static checks
 
@@ -29,13 +34,31 @@ npm test
 
 Expected: all unit and mocked-MCP-integration tests pass; live tests are skipped because `PUBCHEM_MCP_LIVE_TESTS` is unset.
 
-Optional live verification (requires outbound DNS+HTTPS to `pubchem.ncbi.nlm.nih.gov`):
+### Required prepublish: live tests + controlled failure check
+
+Run live tests from a **network-capable environment**:
 
 ```bash
 PUBCHEM_MCP_LIVE_TESTS=1 npm test
 ```
 
-If live tests fail with `MCP tool error` payloads, the diagnostic message includes the full error response — typically a 503, a DNS failure, or a rate-limit hit. Re-run after the apparent cause resolves; do not silence the gate.
+All live tests must pass. The suite should complete in well under a minute when network is reachable.
+
+Verify the transport-error contract with one **controlled network-failure run**:
+
+```bash
+# Force every outbound call to fail with a DNS error. The live suite should
+# still complete promptly (≤ ~60s) and each live test should produce a
+# diagnostic message containing `"category": "transient"`.
+PUBCHEM_MCP_LIVE_TESTS=1 PUBCHEM_BASE_URL=https://pubchem.invalid/rest/pug \
+  PUBCHEM_VIEW_BASE_URL=https://pubchem.invalid/rest/pug_view \
+  npm test 2>&1 | tee /tmp/pubchem-live-failmode.log
+
+# Confirm we got typed transient errors (not raw fetch failures):
+grep -c '"category": "transient"' /tmp/pubchem-live-failmode.log
+```
+
+If live tests fail with `MCP tool error` payloads when network *is* available, the diagnostic message includes the full error response — typically a 503, a DNS failure, or a rate-limit hit. Re-run after the apparent cause resolves; do not silence the gate.
 
 ## Audit
 

@@ -56,6 +56,17 @@ Not retried (typed as `PubChemValidationError` / `PubChemNotFoundError` / `PubCh
 
 PubChem also returns a `Fault` object inside 2xx bodies for some failure modes; the client maps those to the same typed errors based on `Fault.Code`.
 
+### Transport-error normalization
+
+DNS, TLS, connection-refused, connection-reset, host-unreachable, and timeout failures all surface as `PubChemTransientError` after the configured retry budget is exhausted, instead of leaking a raw `TypeError: fetch failed` or `AbortError` to MCP clients. The error carries:
+
+- `category: "transient"`
+- `retryable: true`
+- a **sanitized** `endpoint` label (no full URL, no user-controlled inputs)
+- a human-readable message (`Network error while contacting PubChem (ENOTFOUND)`, `PubChem request timed out after 30000ms`, etc.)
+
+The original error is attached as `cause` for server-side logging only — it is not embedded in the MCP response. Recognized retryable transport conditions: `AbortError` (timeout), `TypeError: fetch failed` (native fetch), and Node network codes `ENOTFOUND`, `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `EAI_AGAIN`, `EPIPE`, `EHOSTUNREACH`, `ENETUNREACH`, `EAGAIN`.
+
 ## Timeouts
 
 `PUBCHEM_TIMEOUT_MS` (default 30s) is enforced via `AbortController`. Caller-supplied `AbortSignal`s are honored and merged.
@@ -72,8 +83,7 @@ Currently used for:
 
 - `resolveCompound({ identifierType: 'inchi' })` → `POST /compound/inchi/cids/JSON`
 - `searchStructure({ queryType: 'inchi' })` → `POST /compound/{fastidentity|fastsimilarity_2d|fastsubstructure|fastsuperstructure}/inchi/cids/JSON`
-
-SMILES lookups continue to use path-encoded GET.
+- `resolveCompound({ identifierType: 'smiles' })` and `searchStructure({ queryType: 'smiles' })` when the SMILES string contains URL-reserved characters (`#`, `/`, `\`, `+`, `?`, `&`, `%`) or exceeds 256 characters. Simple SMILES continue to use path-encoded GET. The decision is made by `shouldUseSmilesPost` in `src/pubchem/pubchemUrls.ts`.
 
 ## ListKey async polling
 
